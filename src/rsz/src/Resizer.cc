@@ -6625,16 +6625,53 @@ bool Resizer::checkAndMarkVTSwappable(
     return false;
   }
   sta::LibertyCellSeq equiv_cells = getVTEquivCells(curr_lib_cell);
-  if (equiv_cells.empty()) {
+  auto it = std::ranges::find(equiv_cells, curr_lib_cell);
+  if (it == equiv_cells.end()) {
     notSwappable.insert(inst);
     return false;
   }
-  best_lib_cell = equiv_cells.back();
-  if (best_lib_cell == curr_lib_cell) {
+  sta::LibertyCell* running_best = curr_lib_cell;
+  for (++it; it != equiv_cells.end(); ++it) {
+    sta::LibertyCell* cand_cell = *it;
+    bool weakens_drive = false;
+    for (sta::Scene* scene : sta_->scenes()) {
+      const int lib_ap = scene->libertyIndex(max_);
+      sta::LibertyCell* best_corner = running_best->sceneCell(lib_ap);
+      sta::LibertyCell* cand_corner = cand_cell->sceneCell(lib_ap);
+      if (best_corner == nullptr || cand_corner == nullptr) {
+        continue;
+      }
+      sta::LibertyCellPortIterator port_iter(best_corner);
+      while (port_iter.hasNext()) {
+        sta::LibertyPort* best_port = port_iter.next();
+        if (!best_port->direction()->isAnyOutput()) {
+          continue;
+        }
+        sta::LibertyPort* cand_port
+            = cand_corner->findLibertyPort(best_port->name());
+        if (cand_port == nullptr
+            || cand_port->driveResistance(sta::RiseFall::rise(), max_)
+                   > best_port->driveResistance(sta::RiseFall::rise(), max_)
+            || cand_port->driveResistance(sta::RiseFall::fall(), max_)
+                   > best_port->driveResistance(sta::RiseFall::fall(), max_)) {
+          weakens_drive = true;
+          break;
+        }
+      }
+      if (weakens_drive) {
+        break;
+      }
+    }
+    if (!weakens_drive) {
+      running_best = cand_cell;
+    }
+  }
+  if (running_best == curr_lib_cell) {
     best_lib_cell = nullptr;
     notSwappable.insert(inst);
     return false;
   }
+  best_lib_cell = running_best;
 
   return true;
 }

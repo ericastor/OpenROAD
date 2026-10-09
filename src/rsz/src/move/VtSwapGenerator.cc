@@ -3,6 +3,7 @@
 
 #include "VtSwapGenerator.hh"
 
+#include <algorithm>
 #include <memory>
 #include <unordered_set>
 #include <vector>
@@ -12,10 +13,16 @@
 #include "OptimizerTypes.hh"
 #include "VtSwapCandidate.hh"
 #include "db_sta/dbNetwork.hh"
+#include "db_sta/dbSta.hh"
 #include "rsz/Resizer.hh"
+#include "sta/Liberty.hh"
 #include "sta/LibertyClass.hh"
+#include "sta/MinMax.hh"
 #include "sta/Network.hh"
 #include "sta/NetworkClass.hh"
+#include "sta/PortDirection.hh"
+#include "sta/Scene.hh"
+#include "sta/Transition.hh"
 
 namespace rsz {
 
@@ -106,10 +113,53 @@ bool VtSwapGenerator::resolvePathCurrentCell(sta::Pin* drvr_pin,
 bool VtSwapGenerator::selectBestEquivCell(sta::LibertyCell* curr_cell,
                                           sta::LibertyCell*& best_cell) const
 {
-  sta::LibertyCellSeq equiv_cells = resizer_.getVTEquivCells(curr_cell);
-  best_cell = equiv_cells.empty() ? nullptr : equiv_cells.back();
-  if (best_cell == curr_cell) {
-    best_cell = nullptr;
+  best_cell = nullptr;
+  const sta::LibertyCellSeq equiv_cells = resizer_.getVTEquivCells(curr_cell);
+  auto it = std::ranges::find(equiv_cells, curr_cell);
+  if (it == equiv_cells.end()) {
+    return false;
+  }
+
+  const sta::MinMax* max = sta::MinMax::max();
+  sta::LibertyCell* running_best = curr_cell;
+  for (++it; it != equiv_cells.end(); ++it) {
+    sta::LibertyCell* cand_cell = *it;
+    bool weakens_drive = false;
+    for (sta::Scene* scene : resizer_.sta()->scenes()) {
+      const int lib_ap = scene->libertyIndex(max);
+      sta::LibertyCell* best_corner = running_best->sceneCell(lib_ap);
+      sta::LibertyCell* cand_corner = cand_cell->sceneCell(lib_ap);
+      if (best_corner == nullptr || cand_corner == nullptr) {
+        continue;
+      }
+      sta::LibertyCellPortIterator port_iter(best_corner);
+      while (port_iter.hasNext()) {
+        sta::LibertyPort* best_port = port_iter.next();
+        if (!best_port->direction()->isAnyOutput()) {
+          continue;
+        }
+        sta::LibertyPort* cand_port
+            = cand_corner->findLibertyPort(best_port->name());
+        if (cand_port == nullptr
+            || cand_port->driveResistance(sta::RiseFall::rise(), max)
+                   > best_port->driveResistance(sta::RiseFall::rise(), max)
+            || cand_port->driveResistance(sta::RiseFall::fall(), max)
+                   > best_port->driveResistance(sta::RiseFall::fall(), max)) {
+          weakens_drive = true;
+          break;
+        }
+      }
+      if (weakens_drive) {
+        break;
+      }
+    }
+    if (!weakens_drive) {
+      running_best = cand_cell;
+    }
+  }
+
+  if (running_best != curr_cell) {
+    best_cell = running_best;
   }
   return best_cell != nullptr;
 }
